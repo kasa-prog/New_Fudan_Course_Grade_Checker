@@ -35,15 +35,32 @@ Features:
 
 # --- Configuration ---
 GRADES_FILE = "grades_encrypted.json"
-SMTP_SERVER = 'smtp.qq.com'
-SMTP_PORT = 465 # SSL port for QQ SMTP
+DEFAULT_SMTP_PORT = 465  # SSL port
+
+
+def get_sender_email():
+    return os.environ.get("EMAIL_SENDER") or os.environ.get("QQ_EMAIL_SENDER", "")
+
+
+def get_smtp_auth_code():
+    return os.environ.get("SMTP_AUTH_CODE") or os.environ.get("QQ_SMTP", "")
+
+
+def resolve_smtp_config(sender_email):
+    domain = (sender_email or "").split("@")[-1].lower()
+    if domain == "gmail.com":
+        return "smtp.gmail.com", DEFAULT_SMTP_PORT
+    if domain == "qq.com":
+        return "smtp.qq.com", DEFAULT_SMTP_PORT
+    raise ValueError(f"Unsupported sender email domain for SMTP auto config: {domain}")
+
 
 def get_encryption_key():
     """Generates a Fernet key from 4 environment variables to prevent collision."""
     stu_id = os.environ.get("StuId", "")
     password = os.environ.get("UISPsw", "")
-    sender = os.environ.get("QQ_EMAIL_SENDER", "")
-    smtp = os.environ.get("QQ_SMTP", "")
+    sender = get_sender_email()
+    smtp = get_smtp_auth_code()
     
     # Combine variables with separators to ensure uniqueness
     raw_key = f"{stu_id}|{password}|{sender}|{smtp}"
@@ -83,11 +100,12 @@ def send_email(subject, body, recipient_email, sender_email, smtp_auth_code):
     message['Subject'] = Header(subject)
 
     try:
-        smtp_obj = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
+        smtp_server, smtp_port = resolve_smtp_config(sender_email)
+        smtp_obj = smtplib.SMTP_SSL(smtp_server, smtp_port)
         smtp_obj.login(sender_email, smtp_auth_code)
         smtp_obj.sendmail(sender_email, recipient_email, message.as_string())
         smtp_obj.quit()
-        print(f"[+] Email notification sent to {recipient_email}")
+        print(f"[+] Email notification sent to {recipient_email} via {smtp_server}")
     except Exception as e:
         print(f"[-] Error sending email: {e}")
 
@@ -292,18 +310,18 @@ def crawl_grades():
 
 def compare_and_notify(new_grades_data):
     """Compares new grades with old, calculates GPA, and sends notifications."""
-    sender_email = os.environ.get("QQ_EMAIL_SENDER")
+    sender_email = get_sender_email()
     stu_id = os.environ.get("StuId")
     recipient_email = f"{stu_id}@m.fudan.edu.cn" if stu_id else None
-    smtp_auth_code = os.environ.get("QQ_SMTP")
+    smtp_auth_code = get_smtp_auth_code()
 
     # UISPsw is needed for key generation implicitly by get_encryption_key
     # We check required vars for email and basic logic here
     if not smtp_auth_code:
-        print(f"[-] Error: QQ_SMTP environment variable must be set for email notification.")
+        print(f"[-] Error: SMTP_AUTH_CODE (or QQ_SMTP) environment variable must be set for email notification.")
         return
     if not sender_email:
-        print("[-] Error: QQ_EMAIL_SENDER environment variable must be set.")
+        print("[-] Error: EMAIL_SENDER (or QQ_EMAIL_SENDER) environment variable must be set.")
         return
     if not stu_id:
         print("[-] Error: StuId environment variable must be set to determine recipient email.")

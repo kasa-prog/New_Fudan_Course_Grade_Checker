@@ -28,6 +28,9 @@ jobs:
       env:
         StuId: ${{ secrets.STUDENT_ID }}
         UISPsw: ${{ secrets.UIS_PASSWORD }}
+        SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
+        EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+        # Backward compatibility
         QQ_SMTP: ${{ secrets.QQ_SMTP_AUTH_CODE }}
         QQ_EMAIL_SENDER: ${{ secrets.QQ_EMAIL_SENDER }}
       run: python crawl_grades.py
