@@ -6,6 +6,8 @@ import time
 import json
 import base64
 import smtplib
+import html
+from urllib.parse import parse_qs, urljoin, urlparse, unquote
 from email.mime.text import MIMEText
 from email.header import Header
 from Crypto.PublicKey import RSA
@@ -36,6 +38,100 @@ Features:
 # --- Configuration ---
 GRADES_FILE = "grades_encrypted.json"
 DEFAULT_SMTP_PORT = 465  # SSL port
+
+
+def _redact_auth_params(text):
+    """Redact transient authentication parameters before logging URLs/snippets."""
+    if not text:
+        return ""
+    return re.sub(r"(?i)(lck|loginToken|ticket|SAMLRequest|SAMLResponse)=([^&#\s\"']+)", r"\1=***", text)
+
+
+def _query_keys_from_url(url):
+    parsed = urlparse(url)
+    keys = set(parse_qs(parsed.query, keep_blank_values=True).keys())
+    if parsed.fragment:
+        fragment_query = parsed.fragment.split("?", 1)[1] if "?" in parsed.fragment else parsed.fragment
+        keys.update(parse_qs(fragment_query, keep_blank_values=True).keys())
+    return sorted(keys)
+
+
+def _summarize_url(url):
+    if not url:
+        return ""
+    url = html.unescape(url)
+    parsed = urlparse(url)
+    query_keys = ",".join(_query_keys_from_url(url)) or "-"
+    fragment_path = parsed.fragment.split("?", 1)[0] if parsed.fragment else ""
+    fragment_desc = f"#{fragment_path}" if fragment_path else ""
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}{fragment_desc} [query_keys={query_keys}]"
+
+
+def _extract_auth_params_from_url(url):
+    if not url:
+        return None, None
+
+    url = html.unescape(url)
+    parsed = urlparse(url)
+    query_strings = [parsed.query]
+    if parsed.fragment:
+        query_strings.append(parsed.fragment.split("?", 1)[1] if "?" in parsed.fragment else parsed.fragment)
+
+    for query_string in query_strings:
+        query = parse_qs(query_string, keep_blank_values=True)
+        lck = query.get("lck", [None])[0]
+        entity_id = query.get("entityId", [None])[0]
+        if lck and entity_id:
+            return lck, unquote(entity_id)
+
+    match_lck = re.search(r"(?:[?&#]|^)lck=([^&#]+)", url)
+    match_entity_id = re.search(r"(?:[?&#]|^)entityId=([^&#]+)", url)
+    if match_lck and match_entity_id:
+        return match_lck.group(1), unquote(match_entity_id.group(1))
+
+    return None, None
+
+
+def _extract_auth_params_from_response(response):
+    candidate_urls = []
+    for redirect_response in response.history:
+        candidate_urls.append(redirect_response.url)
+        location = redirect_response.headers.get("Location")
+        if location:
+            candidate_urls.append(location)
+            candidate_urls.append(urljoin(redirect_response.url, location))
+    candidate_urls.append(response.url)
+
+    for candidate_url in candidate_urls:
+        lck, entity_id = _extract_auth_params_from_url(candidate_url)
+        if lck and entity_id:
+            return lck, entity_id
+
+    page_text = html.unescape(response.text or "")
+    match_lck = re.search(r"(?:[?&#]|^)lck=([^&#\"'\s]+)", page_text)
+    match_entity_id = re.search(r"(?:[?&#]|^)entityId=([^&#\"'\s]+)", page_text)
+    if match_lck and match_entity_id:
+        return match_lck.group(1), unquote(match_entity_id.group(1))
+
+    return None, None
+
+
+def _format_redirect_diagnostics(response):
+    lines = ["[-] Redirect diagnostics:"]
+    chain = list(response.history) + [response]
+    for index, item in enumerate(chain):
+        line = f"    {index}. status={item.status_code} url={_summarize_url(item.url)}"
+        location = item.headers.get("Location")
+        if location:
+            line += f" location={_summarize_url(urljoin(item.url, location))}"
+        lines.append(line)
+
+    content_type = response.headers.get("Content-Type", "")
+    body_head = re.sub(r"\s+", " ", response.text[:300]).strip() if response.text else ""
+    if body_head:
+        lines.append(f"    final_content_type={content_type}")
+        lines.append(f"    final_body_head={_redact_auth_params(body_head)}")
+    return "\n".join(lines)
 
 
 def get_sender_email():
@@ -173,22 +269,16 @@ def crawl_grades():
     target_url = "https://fdjwgl.fudan.edu.cn/student/for-std/grade/sheet/"
     print(f"[*] Accessing {target_url}...")
     try:
-        res = session.get(target_url, allow_redirects=True)
+        res = session.get(target_url, allow_redirects=True, timeout=30)
     except Exception as e:
         raise Exception(f"[-] Network error: {e}")
     
-    # Extract lck and entityId from the UIS login URL
-    lck = None
-    match_lck = re.search(r'lck=([^&]+)', res.url)
-    if match_lck:
-        lck = match_lck.group(1)
-    
-    entityId = None
-    match_eid = re.search(r'entityId=([^&]+)', res.url)
-    if match_eid:
-        entityId = requests.utils.unquote(match_eid.group(1))
+    # Extract lck and entityId from the UIS redirect chain. On some runners,
+    # requests may drop the URL fragment from res.url, so inspect Location too.
+    lck, entityId = _extract_auth_params_from_response(res)
 
     if not lck or not entityId:
+        print(_format_redirect_diagnostics(res))
         raise Exception("[-] Failed to get authentication parameters from redirect URL.")
 
     # Step 2: Query authentication methods to get authChainCode
