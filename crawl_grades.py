@@ -7,7 +7,7 @@ import json
 import base64
 import smtplib
 import html
-from urllib.parse import parse_qs, urljoin, urlparse, unquote
+from urllib.parse import parse_qs, quote, urljoin, urlparse, unquote
 from email.mime.text import MIMEText
 from email.header import Header
 from Crypto.PublicKey import RSA
@@ -132,6 +132,12 @@ def _format_redirect_diagnostics(response):
         lines.append(f"    final_content_type={content_type}")
         lines.append(f"    final_body_head={_redact_auth_params(body_head)}")
     return "\n".join(lines)
+
+
+def _build_uis_bootstrap_url():
+    target_url = "https://fdjwgl.fudan.edu.cn/student/for-std/grade/sheet/"
+    service_url = f"https://fdjwgl.fudan.edu.cn/student/sso/login?refer={target_url}"
+    return f"https://id.fudan.edu.cn/idp/authCenter/authenticate?service={quote(service_url, safe='')}"
 
 
 def get_sender_email():
@@ -278,8 +284,18 @@ def crawl_grades():
     lck, entityId = _extract_auth_params_from_response(res)
 
     if not lck or not entityId:
+        print("[*] Target page did not redirect to UIS. Trying direct UIS bootstrap...")
         print(_format_redirect_diagnostics(res))
-        raise Exception("[-] Failed to get authentication parameters from redirect URL.")
+        bootstrap_url = _build_uis_bootstrap_url()
+        try:
+            res_bootstrap = session.get(bootstrap_url, allow_redirects=True, timeout=30)
+        except Exception as e:
+            raise Exception(f"[-] UIS bootstrap network error: {e}")
+        lck, entityId = _extract_auth_params_from_response(res_bootstrap)
+
+        if not lck or not entityId:
+            print(_format_redirect_diagnostics(res_bootstrap))
+            raise Exception("[-] Failed to get authentication parameters from redirect URL.")
 
     # Step 2: Query authentication methods to get authChainCode
     print("[*] Querying authentication methods...")
