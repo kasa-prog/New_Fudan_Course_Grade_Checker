@@ -134,6 +134,45 @@ def _format_redirect_diagnostics(response):
     return "\n".join(lines)
 
 
+def _extract_client_redirect_url(response):
+    page_text = html.unescape(response.text or "")
+    patterns = [
+        r'var\s+locationValue\s*=\s*["\']([^"\']+)["\']',
+        r'(?:window\.)?location(?:\.href)?\s*=\s*["\']([^"\']+)["\']',
+        r'(?:window\.)?location\.replace\(\s*["\']([^"\']+)["\']\s*\)',
+        r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+content=["\'][^"\']*url=([^"\']+)["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, page_text, flags=re.IGNORECASE)
+        if match:
+            return urljoin(response.url, match.group(1).replace("&amp;", "&"))
+    return None
+
+
+def _follow_client_redirects(session, response, max_hops=3):
+    for _ in range(max_hops):
+        next_url = _extract_client_redirect_url(response)
+        if not next_url:
+            break
+        response = session.get(next_url, allow_redirects=True, timeout=30)
+    return response
+
+
+def _extract_grade_sheet_id(response):
+    candidates = [response.url, html.unescape(response.text or "")]
+    patterns = [
+        r"semester-index/(\d+)",
+        r"grade/sheet/info/(\d+)",
+        r"gradeSheetId[\"'\s:=]+(\d+)",
+    ]
+    for candidate in candidates:
+        for pattern in patterns:
+            match = re.search(pattern, candidate)
+            if match:
+                return match.group(1)
+    return None
+
+
 def _build_uis_bootstrap_url():
     target_url = "https://fdjwgl.fudan.edu.cn/student/for-std/grade/sheet/"
     service_url = f"https://fdjwgl.fudan.edu.cn/student/sso/login?refer={target_url}"
@@ -359,8 +398,9 @@ def crawl_grades():
         
         redirect_url = match_loc.group(1).replace('&amp;', '&')
         # Visit the redirect URL to set cookies for the student system
-        res_final = session.get(redirect_url, allow_redirects=True)
-        print(f"[+] Login final redirection: {res_final.url}")
+        res_final = session.get(redirect_url, allow_redirects=True, timeout=30)
+        res_final = _follow_client_redirects(session, res_final)
+        print(f"[+] Login final redirection: {_summarize_url(res_final.url)}")
     except Exception as e:
         raise Exception(f"[-] Session finalization failed: {e}")
 
@@ -371,12 +411,13 @@ def crawl_grades():
     grade_base_url = "https://fdjwgl.fudan.edu.cn/student/for-std/grade/sheet/"
     print("[*] Detecting student grade sheet ID...")
     try:
-        res_detect = session.get(grade_base_url, allow_redirects=True)
-        match_id = re.search(r'semester-index/(\d+)', res_detect.url)
-        if not match_id:
-            raise Exception(f"[-] Failed to detect grade sheet ID. Final URL was: {res_detect.url}")
+        res_detect = session.get(grade_base_url, allow_redirects=True, timeout=30)
+        res_detect = _follow_client_redirects(session, res_detect)
+        grade_sheet_id = _extract_grade_sheet_id(res_detect)
+        if not grade_sheet_id:
+            print(_format_redirect_diagnostics(res_detect))
+            raise Exception(f"[-] Failed to detect grade sheet ID. Final URL was: {_summarize_url(res_detect.url)}")
         else:
-            grade_sheet_id = match_id.group(1)
             print(f"[+] Detected grade sheet ID")
     except Exception as e:
         raise Exception(f"[-] Error detecting grade sheet ID: {e}")
