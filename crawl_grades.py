@@ -297,6 +297,20 @@ def calculate_gpa(grades_data_map):
         return round(total_gp_x_credits / total_credits, 3)
     return 0.0
 
+
+def course_matches_filter(grade_entry, course_filter):
+    if not course_filter:
+        return False
+
+    needle = course_filter.strip().lower()
+    if not needle:
+        return False
+
+    course_code = str(grade_entry.get("courseCode") or "").strip().lower()
+    course_name = str(grade_entry.get("courseName") or "").strip().lower()
+    return course_code == needle or needle in course_name
+
+
 def crawl_grades():
     stu_id = os.environ.get('StuId')
     password = os.environ.get('UISPsw') # UISPsw will also be used as encryption key
@@ -501,6 +515,23 @@ def compare_and_notify(new_grades_data):
     for semester_grades in old_grades_data.get('semesterId2studentGrades', {}).values():
         for grade_entry in semester_grades:
             old_grades_flat[grade_entry['courseCode']] = grade_entry
+
+    renotify_course = os.environ.get("RENOTIFY_COURSE", "").strip()
+    if renotify_course:
+        renotify_codes = set()
+        for semester_grades in new_grades_data['semesterId2studentGrades'].values():
+            for grade_entry in semester_grades:
+                if course_matches_filter(grade_entry, renotify_course):
+                    course_code = grade_entry.get('courseCode')
+                    if course_code:
+                        renotify_codes.add(course_code)
+
+        if not renotify_codes:
+            raise Exception("[-] RENOTIFY_COURSE did not match any current course.")
+
+        for course_code in renotify_codes:
+            old_grades_flat.pop(course_code, None)
+        print(f"[*] Re-notification requested for {len(renotify_codes)} course(s).")
     
     for semester_id, new_semester_grades in new_grades_data['semesterId2studentGrades'].items():
         for new_grade_entry in new_semester_grades:

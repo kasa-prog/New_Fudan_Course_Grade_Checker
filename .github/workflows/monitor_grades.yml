@@ -4,7 +4,12 @@ on:
   schedule:
     # Runs every hour
     - cron: '0 * * * *'
-  workflow_dispatch: # Allows manual triggering of the workflow
+  workflow_dispatch:
+    inputs:
+      renotify_course:
+        description: 'Optional course code or course name substring to notify again'
+        required: false
+        default: ''
 
 jobs:
   monitor-grades:
@@ -31,6 +36,11 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests pycryptodome cryptography
 
+    - name: Mask manual notification input
+      if: ${{ inputs.renotify_course != '' }}
+      shell: pwsh
+      run: Write-Output "::add-mask::${{ inputs.renotify_course }}"
+
     - name: Run grade crawler
       env:
         StuId: ${{ secrets.STUDENT_ID }}
@@ -40,6 +50,7 @@ jobs:
         # Backward compatibility
         QQ_SMTP: ${{ secrets.QQ_SMTP_AUTH_CODE }}
         QQ_EMAIL_SENDER: ${{ secrets.QQ_EMAIL_SENDER }}
+        RENOTIFY_COURSE: ${{ inputs.renotify_course }}
       shell: pwsh
       run: python crawl_grades.py
     
