@@ -527,11 +527,11 @@ def compare_and_notify(new_grades_data):
                         renotify_codes.add(course_code)
 
         if not renotify_codes:
-            raise Exception("[-] RENOTIFY_COURSE did not match any current course.")
-
-        for course_code in renotify_codes:
-            old_grades_flat.pop(course_code, None)
-        print(f"[*] Re-notification requested for {len(renotify_codes)} course(s).")
+            print("[-] Warning: RENOTIFY_COURSE did not match any current course. Continuing without manual re-notification.")
+        else:
+            for course_code in renotify_codes:
+                old_grades_flat.pop(course_code, None)
+            print(f"[*] Re-notification requested for {len(renotify_codes)} course(s).")
     
     for semester_id, new_semester_grades in new_grades_data['semesterId2studentGrades'].items():
         for new_grade_entry in new_semester_grades:

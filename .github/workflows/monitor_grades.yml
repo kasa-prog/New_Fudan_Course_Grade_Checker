@@ -11,9 +11,17 @@ on:
         required: false
         default: ''
 
+concurrency:
+  group: fudan-grades-monitor
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
 jobs:
   monitor-grades:
     runs-on: [self-hosted, fudan-grade-checker]
+    timeout-minutes: 20
     env:
       GIT_CONFIG_COUNT: 2
       GIT_CONFIG_KEY_0: http.proxy
