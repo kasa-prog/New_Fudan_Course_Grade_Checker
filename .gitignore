@@ -3,6 +3,7 @@ __pycache__/
 .env
 prepare_test.py
 grades.json
+uis_qr_login.png
 *.ps1
 *.log
 *.txt

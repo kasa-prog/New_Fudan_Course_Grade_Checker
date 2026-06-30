@@ -52,11 +52,21 @@ jobs:
         QQ_EMAIL_SENDER: ${{ secrets.QQ_EMAIL_SENDER }}
         RENOTIFY_COURSE: ${{ inputs.renotify_course }}
         CAMPUS_ACCESS: auto
+        UIS_2FA_MODE: qr
+        UIS_QR_TIMEOUT_SECONDS: ${{ github.event_name == 'workflow_dispatch' && '300' || '30' }}
         ATRUST_PORTAL: ${{ secrets.ATRUST_PORTAL }}
         ATRUST_TOTP_SECRET: ${{ secrets.ATRUST_TOTP_SECRET }}
         ATRUST_COOKIE_TID: ${{ secrets.ATRUST_COOKIE_TID }}
         ATRUST_COOKIE_SIG: ${{ secrets.ATRUST_COOKIE_SIG }}
       run: python crawl_grades.py
+
+    - name: Upload UIS QR login artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: uis-qr-login
+        path: uis_qr_login.png
+        if-no-files-found: ignore
     
     - name: Commit and push changes
       run: |

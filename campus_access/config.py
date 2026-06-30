@@ -12,6 +12,10 @@ ATRUST_PORTAL = (
 ATRUST_AUTH_DOMAIN = os.environ.get("ATRUST_AUTH_DOMAIN", "id.fudan.edu.cn").strip()
 ATRUST_UIS_ENTITY_ID = os.environ.get("ATRUST_UIS_ENTITY_ID", "vpn").strip() or "vpn"
 CAMPUS_ACCESS = os.environ.get("CAMPUS_ACCESS", "auto").strip().lower() or "auto"
+UIS_2FA_MODE = os.environ.get("UIS_2FA_MODE", "qr").strip().lower() or "qr"
+UIS_QR_OUTPUT = os.environ.get("UIS_QR_OUTPUT", "uis_qr_login.png").strip() or "uis_qr_login.png"
+UIS_QR_TIMEOUT_SECONDS = int(os.environ.get("UIS_QR_TIMEOUT_SECONDS", "300"))
+UIS_QR_POLL_INTERVAL_SECONDS = float(os.environ.get("UIS_QR_POLL_INTERVAL_SECONDS", "2"))
 
 WEBVPN_AES_KEY = b"wrdvpnisthebest!"
 WEBVPN_AES_IV = b"wrdvpnisthebest!"
