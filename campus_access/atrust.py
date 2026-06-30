@@ -1,16 +1,12 @@
-"""HTTP-based Sangfor aTrust portal login (best-effort, falls back to WebVPN)."""
+"""Fudan aTrust 2.0 web login via UIS OAuth (vpn.fudan.edu.cn)."""
 
-import base64
-import json
 import os
 import re
-from urllib.parse import urlparse
 
 import requests
-from Crypto.Cipher import PKCS1_v1_5
-from Crypto.PublicKey import RSA
 
 from . import config
+from .uis_auth import extract_auth_params_from_response, uis_password_login
 
 try:
     import pyotp
@@ -19,12 +15,14 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 class ATrustSession:
-    """aTrust web portal session for reaching campus-only services."""
+    """aTrust portal session established through Fudan UIS OAuth."""
 
     mode = "atrust"
 
     def __init__(self, portal: str | None = None):
         self.portal = (portal or config.ATRUST_PORTAL).rstrip("/")
+        if not self.portal:
+            raise ValueError("ATRUST_PORTAL is not configured")
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -32,9 +30,8 @@ class ATrustSession:
                 "Accept": "application/json, text/plain, */*",
             }
         )
-        self.session.verify = True
         self.logged_in = False
-        self._portal_host = urlparse(self.portal).hostname or ""
+        self.auth_config = {}
 
     def get(self, url: str, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", 60)
@@ -46,93 +43,89 @@ class ATrustSession:
 
     def connect_for_grades(self, student_id: str, password: str) -> "ATrustSession":
         self.login(student_id, password)
-        if not self._probe_grade_portal():
+        if not self._probe_campus_reachability():
             raise RuntimeError("aTrust session cannot reach fdjwgl grade portal")
         return self
 
     def login(self, student_id: str, password: str) -> bool:
         tid = os.environ.get("ATRUST_COOKIE_TID", "").strip()
         sig = os.environ.get("ATRUST_COOKIE_SIG", "").strip()
-        if tid and sig and self._portal_host:
-            self.session.cookies.set("tid", tid, domain=self._portal_host)
-            self.session.cookies.set("tid.sig", sig, domain=self._portal_host)
+        if tid and sig:
+            host = requests.utils.urlparse(self.portal).hostname
+            if host:
+                self.session.cookies.set("tid", tid, domain=host)
+                self.session.cookies.set("tid.sig", sig, domain=host)
 
-        print(f"[*] Logging into aTrust portal: {self.portal}")
-        self.session.get(f"{self.portal}/portal/", timeout=30)
+        print(f"[*] Logging into Fudan aTrust portal: {self.portal}")
+        self.auth_config = self._fetch_auth_config()
+        login_url = self._resolve_uis_login_url()
+        print("[*] Starting Fudan UIS OAuth for aTrust (client_id=vpn)...")
 
-        pub_key = self._fetch_auth_pubkey()
-        encrypted_password = self._encrypt_password(password, pub_key)
-        auth_result = self._password_auth(student_id, encrypted_password)
-        self._handle_followup_auth(auth_result, password)
+        bootstrap = self.session.get(login_url, allow_redirects=True, timeout=30)
+        lck, entity_id = extract_auth_params_from_response(bootstrap)
+        if not lck:
+            raise RuntimeError(
+                f"Failed to extract UIS lck from aTrust OAuth bootstrap (status={bootstrap.status_code})"
+            )
+        entity_id = entity_id or config.ATRUST_UIS_ENTITY_ID
+
+        redirect_url = uis_password_login(
+            self.session,
+            student_id,
+            password,
+            lck,
+            entity_id,
+            origin=config.IDP_BASE,
+        )
+        print("[*] Following aTrust OAuth callback...")
+        callback = self.session.get(redirect_url, allow_redirects=True, timeout=60)
+        if callback.status_code >= 400 and "common_error" in callback.url:
+            raise RuntimeError(
+                f"aTrust OAuth callback failed (status={callback.status_code}, url={callback.url})"
+            )
+
+        self._handle_followup_auth(callback)
+        if not self._verify_portal_session():
+            raise RuntimeError("aTrust portal session verification failed after UIS login")
+
         self.logged_in = True
-        print("[+] aTrust portal login successful!")
+        print("[+] Fudan aTrust login successful!")
         return True
 
-    def _fetch_auth_pubkey(self) -> str:
-        candidates = [
-            f"{self.portal}/passport/v1/public/authPubKey",
-            f"{self.portal}/passport/v1/public/preLogin",
-        ]
-        last_error = None
-        for url in candidates:
-            try:
-                resp = self.session.get(url, timeout=30)
-                data = resp.json()
-                pub_key = data.get("data") or data.get("pubKey") or data.get("publicKey")
-                if isinstance(pub_key, dict):
-                    pub_key = pub_key.get("pubKey") or pub_key.get("publicKey")
-                if pub_key:
-                    return pub_key
-            except Exception as exc:
-                last_error = exc
-        raise RuntimeError(f"Failed to fetch aTrust auth public key: {last_error}")
-
-    def _encrypt_password(self, password: str, pub_key_b64: str) -> str:
-        pem = (
-            "-----BEGIN PUBLIC KEY-----\n"
-            + pub_key_b64
-            + "\n-----END PUBLIC KEY-----"
-        )
-        rsa_key = RSA.import_key(pem)
-        cipher = PKCS1_v1_5.new(rsa_key)
-        encrypted = cipher.encrypt(password.encode("utf-8"))
-        return base64.b64encode(encrypted).decode("ascii")
-
-    def _password_auth(self, username: str, encrypted_password: str) -> dict:
-        payload = {
-            "username": username,
-            "password": encrypted_password,
-            "captchaCode": "",
-        }
-        resp = self.session.post(
-            f"{self.portal}/passport/v1/public/auth/password",
-            json=payload,
+    def _fetch_auth_config(self) -> dict:
+        resp = self.session.get(
+            f"{self.portal}/passport/v1/public/authConfig",
             timeout=30,
         )
+        data = resp.json()
+        if data.get("code") not in (0, "0"):
+            raise RuntimeError(f"aTrust authConfig failed: {data.get('message') or data}")
+        auth_config = data.get("data") or {}
+        csrf = (auth_config.get("security") or {}).get("csrfToken")
+        if csrf:
+            self.session.headers["X-CSRF-Token"] = csrf
+        return auth_config
+
+    def _resolve_uis_login_url(self) -> str:
+        first_auth = (self.auth_config.get("firstAuth") or [None])[0]
+        if first_auth:
+            return first_auth
+
+        for server in self.auth_config.get("authServerInfoList") or []:
+            if server.get("loginDomain") == config.ATRUST_AUTH_DOMAIN and server.get("loginUrl"):
+                return server["loginUrl"]
+
+        raise RuntimeError("aTrust authConfig did not expose a UIS login URL")
+
+    def _handle_followup_auth(self, callback: requests.Response):
+        next_service = None
         try:
-            data = resp.json()
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"aTrust password auth returned non-JSON (status={resp.status_code})"
-            ) from exc
+            payload = callback.json()
+            next_service = (payload.get("data") or {}).get("nextService")
+        except ValueError:
+            pass
 
-        code = data.get("code")
-        if code not in (0, "0", 200, "200"):
-            message = data.get("message") or data.get("msg") or data
-            raise RuntimeError(f"aTrust password auth failed: {message}")
-        return data
-
-    def _handle_followup_auth(self, auth_result: dict, password: str):
-        next_auth = (
-            auth_result.get("nextAuth")
-            or auth_result.get("nextAuthType")
-            or auth_result.get("data", {}).get("nextAuth")
-        )
-        if not next_auth or str(next_auth).upper() in {"OK", "NONE", "0"}:
-            return
-
-        next_auth_upper = str(next_auth).upper()
-        if "TOTP" in next_auth_upper:
+        if next_service and "totp" in str(next_service).lower():
             totp_secret = os.environ.get("ATRUST_TOTP_SECRET", "").strip()
             if not totp_secret:
                 raise RuntimeError("aTrust requires TOTP; set ATRUST_TOTP_SECRET")
@@ -147,11 +140,17 @@ class ATrustSession:
             data = resp.json()
             if data.get("code") not in (0, "0", 200, "200"):
                 raise RuntimeError(f"aTrust TOTP auth failed: {data}")
-            return
 
-        raise RuntimeError(f"Unsupported aTrust follow-up auth type: {next_auth}")
+    def _verify_portal_session(self) -> bool:
+        try:
+            resp = self.session.get(f"{self.portal}/portal/", timeout=30)
+            if resp.status_code == 200:
+                return True
+        except requests.RequestException:
+            pass
+        return False
 
-    def _probe_grade_portal(self) -> bool:
+    def _probe_campus_reachability(self) -> bool:
         try:
             resp = self.get(config.GRADE_TARGET, allow_redirects=True, timeout=30)
         except requests.RequestException as exc:
@@ -168,7 +167,7 @@ class ATrustSession:
             return True
 
         if re.search(r"lck=", resp.url) or re.search(r"entityId=", resp.url):
-            print("[*] aTrust reached UIS redirect for fdjwgl (acceptable)")
+            print("[*] aTrust reached fdjwgl UIS redirect (acceptable)")
             return True
 
         print("[-] aTrust session did not reach fdjwgl content")

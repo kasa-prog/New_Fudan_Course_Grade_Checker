@@ -48,9 +48,6 @@ def connect_grade_session(student_id: str | None = None, password: str | None = 
     errors: list[str] = []
 
     for backend in backends:
-        if backend == "atrust" and not os.environ.get("ATRUST_PORTAL", "").strip():
-            print("[*] Skipping aTrust backend: ATRUST_PORTAL is not configured")
-            continue
         print(f"[*] Trying campus access backend: {backend}")
         try:
             if backend == "atrust":
