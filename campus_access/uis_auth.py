@@ -84,7 +84,7 @@ def uis_password_login(
 ) -> str:
     """Run UIS username/password auth and return the post-login redirect URL."""
     origin = origin or config.IDP_BASE
-    referer = f"{config.IDP_BASE}/ac/"
+    referer = f"{config.IDP_BASE}/ac/#/index?lck={lck}&entityId={requests.utils.quote(entity_id, safe='')}"
 
     resp = session.post(
         f"{config.IDP_BASE}/idp/authn/queryAuthMethods",
@@ -105,7 +105,7 @@ def uis_password_login(
     if not auth_chain_code:
         raise RuntimeError("UIS queryAuthMethods did not return userAndPwd chain")
 
-    resp = session.get(
+    resp = session.post(
         f"{config.IDP_BASE}/idp/authn/getJsPublicKey",
         headers={"Referer": referer},
         timeout=30,
@@ -142,9 +142,14 @@ def uis_password_login(
             f"UIS authExecute failed: {execute_data.get('message') or execute_data}"
         )
 
-    login_token = execute_data.get("loginToken", "")
+    login_token = execute_data.get("loginToken") or (execute_data.get("data") or {}).get(
+        "loginToken"
+    )
     if not login_token:
-        raise RuntimeError("UIS authExecute returned no loginToken")
+        raise RuntimeError(
+            "UIS authExecute returned no loginToken "
+            f"(keys={sorted(execute_data.keys())})"
+        )
 
     resp = session.post(
         f"{config.IDP_BASE}/idp/authCenter/authnEngine",

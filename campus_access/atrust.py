@@ -68,6 +68,7 @@ class ATrustSession:
                 f"Failed to extract UIS lck from aTrust OAuth bootstrap (status={bootstrap.status_code})"
             )
         entity_id = entity_id or config.ATRUST_UIS_ENTITY_ID
+        self.session.get(bootstrap.url, timeout=30)
 
         redirect_url = uis_password_login(
             self.session,
