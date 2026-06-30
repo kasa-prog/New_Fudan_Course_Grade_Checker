@@ -1,6 +1,7 @@
 """Shared Fudan UIS authentication helpers."""
 
 import html as html_mod
+import os
 import re
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
@@ -10,6 +11,134 @@ from Crypto.PublicKey import RSA
 import base64
 
 from . import config
+
+try:
+    import pyotp
+except ImportError:  # pragma: no cover - optional dependency
+    pyotp = None
+
+
+def _resolve_totp_secret() -> str:
+    return os.environ.get("ATRUST_TOTP_SECRET", "").strip() or os.environ.get(
+        "UIS_TOTP_SECRET", ""
+    ).strip()
+
+
+def _extract_login_token(execute_data: dict) -> str | None:
+    login_token = execute_data.get("loginToken")
+    data_field = execute_data.get("data")
+    if not login_token and isinstance(data_field, dict):
+        login_token = data_field.get("loginToken")
+    if not login_token and isinstance(data_field, str):
+        if data_field.startswith("http"):
+            return html_mod.unescape(data_field.replace("&amp;", "&"))
+        if data_field.strip():
+            login_token = data_field.strip()
+    return login_token or None
+
+
+def _secondary_module_codes(execute_data: dict) -> list[str]:
+    module_codes = execute_data.get("moduleCodes") or execute_data.get("moduleCode") or []
+    if isinstance(module_codes, str):
+        return [module_codes]
+    return list(module_codes)
+
+
+def _uis_auth_execute(
+    session: requests.Session,
+    *,
+    referer: str,
+    origin: str,
+    payload: dict,
+) -> dict:
+    resp = session.post(
+        f"{config.IDP_BASE}/idp/authn/authExecute",
+        json=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Referer": referer,
+            "Origin": origin,
+        },
+        timeout=30,
+    )
+    execute_data = resp.json()
+    if str(execute_data.get("code")) != "200":
+        raise RuntimeError(
+            f"UIS authExecute failed: {execute_data.get('message') or execute_data}"
+        )
+    return execute_data
+
+
+def _uis_followup_with_otp(
+    session: requests.Session,
+    *,
+    referer: str,
+    origin: str,
+    lck: str,
+    entity_id: str,
+    auth_chain_code: str,
+    request_type: str,
+    execute_data: dict,
+) -> str:
+    totp_secret = _resolve_totp_secret()
+    if not totp_secret:
+        modules = _secondary_module_codes(execute_data)
+        raise RuntimeError(
+            "UIS requires secondary authentication for aTrust OAuth "
+            f"(module={modules}, message={execute_data.get('message')}). "
+            "Bind third-party OTP in mail.fudan.edu.cn and set ATRUST_TOTP_SECRET."
+        )
+    if pyotp is None:
+        raise RuntimeError("UIS OTP requires pyotp package")
+
+    modules = _secondary_module_codes(execute_data)
+    module_candidates = []
+    for preferred in ("userAndOtp", "userAndOA"):
+        if preferred in modules:
+            module_candidates.append(preferred)
+    if not module_candidates:
+        module_candidates = ["userAndOtp", "userAndOA"]
+
+    otp_code = pyotp.TOTP(totp_secret).now()
+    chain_code = execute_data.get("authChainCode") or auth_chain_code
+    field_candidates = ("dynamicPassword", "otpCode", "verifyCode", "token")
+
+    last_error = ""
+    for module_code in module_candidates:
+        for field_name in field_candidates:
+            payload = {
+                "authModuleCode": module_code,
+                "authChainCode": chain_code,
+                "entityId": entity_id,
+                "requestType": request_type,
+                "lck": lck,
+                "authPara": {field_name: otp_code},
+            }
+            try:
+                otp_data = _uis_auth_execute(
+                    session, referer=referer, origin=origin, payload=payload
+                )
+            except RuntimeError as exc:
+                last_error = str(exc)
+                continue
+
+            login_token = _extract_login_token(otp_data)
+            if isinstance(login_token, str) and login_token.startswith("http"):
+                return login_token
+            if login_token:
+                print(f"[+] UIS secondary OTP accepted via {module_code}/{field_name}")
+                return login_token
+            last_error = (
+                f"UIS OTP step returned no loginToken "
+                f"(module={module_code}, field={field_name}, "
+                f"message={otp_data.get('message')})"
+            )
+
+    modules = _secondary_module_codes(execute_data)
+    raise RuntimeError(
+        "UIS secondary OTP authentication failed "
+        f"(available={modules}, last={last_error or 'unknown'})"
+    )
 
 
 def extract_auth_params_from_url(url):
@@ -115,9 +244,11 @@ def uis_password_login(
         raise RuntimeError("UIS getJsPublicKey returned empty key")
 
     encrypted_password = encrypt_password(password, pub_key_b64)
-    resp = session.post(
-        f"{config.IDP_BASE}/idp/authn/authExecute",
-        json={
+    execute_data = _uis_auth_execute(
+        session,
+        referer=referer,
+        origin=origin,
+        payload={
             "authModuleCode": "userAndPwd",
             "authChainCode": auth_chain_code,
             "entityId": entity_id,
@@ -129,40 +260,30 @@ def uis_password_login(
                 "verifyCode": "",
             },
         },
-        headers={
-            "Content-Type": "application/json",
-            "Referer": referer,
-            "Origin": origin,
-        },
-        timeout=30,
     )
-    execute_data = resp.json()
-    if str(execute_data.get("code")) != "200":
-        raise RuntimeError(
-            f"UIS authExecute failed: {execute_data.get('message') or execute_data}"
-        )
 
-    login_token = execute_data.get("loginToken")
-    data_field = execute_data.get("data")
-    if not login_token and isinstance(data_field, dict):
-        login_token = data_field.get("loginToken")
-    if not login_token and isinstance(data_field, str):
-        if data_field.startswith("http"):
-            return html_mod.unescape(data_field.replace("&amp;", "&"))
-        if data_field.strip():
-            login_token = data_field.strip()
+    login_token = _extract_login_token(execute_data)
+    if isinstance(login_token, str) and login_token.startswith("http"):
+        return login_token
 
     if not login_token:
-        module_codes = execute_data.get("moduleCodes") or execute_data.get("moduleCode")
+        module_codes = _secondary_module_codes(execute_data)
         if execute_data.get("second") or module_codes:
-            raise RuntimeError(
-                "UIS requires secondary authentication for aTrust OAuth "
-                f"(module={module_codes}, message={execute_data.get('message')})"
+            login_token = _uis_followup_with_otp(
+                session,
+                referer=referer,
+                origin=origin,
+                lck=lck,
+                entity_id=entity_id,
+                auth_chain_code=auth_chain_code,
+                request_type=query_data.get("requestType", "chain_type"),
+                execute_data=execute_data,
             )
-        raise RuntimeError(
-            "UIS authExecute returned no loginToken "
-            f"(message={execute_data.get('message')}, moduleCode={execute_data.get('moduleCode')})"
-        )
+        else:
+            raise RuntimeError(
+                "UIS authExecute returned no loginToken "
+                f"(message={execute_data.get('message')}, moduleCode={execute_data.get('moduleCode')})"
+            )
 
     resp = session.post(
         f"{config.IDP_BASE}/idp/authCenter/authnEngine",
