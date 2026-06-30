@@ -156,25 +156,33 @@ def _poll_qr_login_token(
     *,
     referer: str,
     origin: str,
+    student_id: str,
     lck: str,
     entity_id: str,
     auth_chain_code: str,
     request_type: str,
+    request_number,
 ) -> str:
     params = {
         "lck": lck,
         "entityId": entity_id,
         "authModuleCode": "qr",
         "authChainCode": auth_chain_code,
+        "loginName": student_id,
     }
+    if request_number is not None:
+        params["requestNumber"] = request_number
+
     poll_payload = {
         "authModuleCode": "qr",
         "authChainCode": auth_chain_code,
         "entityId": entity_id,
         "requestType": request_type,
         "lck": lck,
-        "authPara": {},
+        "authPara": {"loginName": student_id},
     }
+    if request_number is not None:
+        poll_payload["requestNumber"] = request_number
 
     deadline = time.time() + config.UIS_QR_TIMEOUT_SECONDS
     qr_saved = False
@@ -222,6 +230,7 @@ def _uis_followup_with_qr(
     *,
     referer: str,
     origin: str,
+    student_id: str,
     lck: str,
     entity_id: str,
     auth_chain_code: str,
@@ -236,16 +245,20 @@ def _uis_followup_with_qr(
         )
 
     chain_code = execute_data.get("authChainCode") or auth_chain_code
+    request_number = execute_data.get("requestNumber")
     print("[*] UIS requires E账通 QR scan for secondary authentication")
 
+    auth_para = {"loginName": student_id}
     select_payload = {
         "authModuleCode": "qr",
         "authChainCode": chain_code,
         "entityId": entity_id,
         "requestType": request_type,
         "lck": lck,
-        "authPara": {},
+        "authPara": auth_para,
     }
+    if request_number is not None:
+        select_payload["requestNumber"] = request_number
     try:
         select_data = _uis_auth_execute(
             session, referer=referer, origin=origin, payload=select_payload
@@ -265,10 +278,12 @@ def _uis_followup_with_qr(
         session,
         referer=referer,
         origin=origin,
+        student_id=student_id,
         lck=lck,
         entity_id=entity_id,
         auth_chain_code=chain_code,
         request_type=request_type,
+        request_number=request_number,
     )
 
 
@@ -348,6 +363,7 @@ def _uis_followup_secondary(
     *,
     referer: str,
     origin: str,
+    student_id: str,
     lck: str,
     entity_id: str,
     auth_chain_code: str,
@@ -362,6 +378,7 @@ def _uis_followup_secondary(
             session,
             referer=referer,
             origin=origin,
+            student_id=student_id,
             lck=lck,
             entity_id=entity_id,
             auth_chain_code=auth_chain_code,
@@ -516,6 +533,7 @@ def uis_password_login(
                 session,
                 referer=referer,
                 origin=origin,
+                student_id=student_id,
                 lck=lck,
                 entity_id=entity_id,
                 auth_chain_code=auth_chain_code,
