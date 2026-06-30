@@ -93,7 +93,9 @@ class WebVPNSession:
             if _extract_grade_sheet_id_from_response(probe_after):
                 print(f"[*] fdjwgl SSO step skipped after retry probe: {exc}")
                 return self
-            raise
+            # WebVPN login alone may still be enough for fdjwgl via subsequent UIS login.
+            print(f"[*] fdjwgl SSO through WebVPN unavailable, keeping WebVPN session: {exc}")
+            return self
         return self
 
     def login(self, student_id: str, password: str) -> bool:

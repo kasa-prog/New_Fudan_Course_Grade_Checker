@@ -142,13 +142,26 @@ def uis_password_login(
             f"UIS authExecute failed: {execute_data.get('message') or execute_data}"
         )
 
-    login_token = execute_data.get("loginToken") or (execute_data.get("data") or {}).get(
-        "loginToken"
-    )
+    login_token = execute_data.get("loginToken")
+    data_field = execute_data.get("data")
+    if not login_token and isinstance(data_field, dict):
+        login_token = data_field.get("loginToken")
+    if not login_token and isinstance(data_field, str):
+        if data_field.startswith("http"):
+            return html_mod.unescape(data_field.replace("&amp;", "&"))
+        if data_field.strip():
+            login_token = data_field.strip()
+
     if not login_token:
+        module_codes = execute_data.get("moduleCodes") or execute_data.get("moduleCode")
+        if execute_data.get("second") or module_codes:
+            raise RuntimeError(
+                "UIS requires secondary authentication for aTrust OAuth "
+                f"(module={module_codes}, message={execute_data.get('message')})"
+            )
         raise RuntimeError(
             "UIS authExecute returned no loginToken "
-            f"(keys={sorted(execute_data.keys())})"
+            f"(message={execute_data.get('message')}, moduleCode={execute_data.get('moduleCode')})"
         )
 
     resp = session.post(
