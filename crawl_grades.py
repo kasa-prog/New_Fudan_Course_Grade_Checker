@@ -311,29 +311,15 @@ def course_matches_filter(grade_entry, course_filter):
     return course_code == needle or needle in course_name
 
 
-def crawl_grades():
-    stu_id = os.environ.get('StuId')
-    password = os.environ.get('UISPsw') # UISPsw will also be used as encryption key
-
-    if not stu_id or not password:
-        print("[-] Error: Environment variables StuId and UISPsw must be set.")
-        sys.exit(1)
-
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    })
-
-    # Step 1: Access target page to trigger redirection to UIS
+def _login_direct(session, stu_id, password):
+    """Authenticate to fdjwgl via UIS (direct or via aTrust-routed network)."""
     target_url = "https://fdjwgl.fudan.edu.cn/student/for-std/grade/sheet/"
     print(f"[*] Accessing {target_url}...")
     try:
         res = session.get(target_url, allow_redirects=True, timeout=30)
     except Exception as e:
         raise Exception(f"[-] Network error: {e}")
-    
-    # Extract lck and entityId from the UIS redirect chain. On some runners,
-    # requests may drop the URL fragment from res.url, so inspect Location too.
+
     lck, entityId = _extract_auth_params_from_response(res)
 
     if not lck or not entityId:
@@ -350,7 +336,6 @@ def crawl_grades():
             print(_format_redirect_diagnostics(res_bootstrap))
             raise Exception("[-] Failed to get authentication parameters from redirect URL.")
 
-    # Step 2: Query authentication methods to get authChainCode
     print("[*] Querying authentication methods...")
     query_url = "https://id.fudan.edu.cn/idp/authn/queryAuthMethods"
     try:
@@ -361,7 +346,6 @@ def crawl_grades():
     except Exception as e:
         raise Exception(f"[-] Failed to query auth methods: {e}")
 
-    # Step 3: Get RSA public key for password encryption
     print("[*] Retrieving RSA public key...")
     pub_key_url = "https://id.fudan.edu.cn/idp/authn/getJsPublicKey"
     try:
@@ -370,10 +354,8 @@ def crawl_grades():
     except Exception as e:
         raise Exception(f"[-] Failed to get public key: {e}")
 
-    # Step 4: Encrypt password
     encrypted_password_uis = encrypt_password(password, pub_key)
 
-    # Step 5: Execute authentication
     print("[*] Authenticating...")
     execute_url = "https://id.fudan.edu.cn/idp/authn/authExecute"
     payload = {
@@ -399,27 +381,38 @@ def crawl_grades():
 
     login_token = execute_data['loginToken']
 
-    # Step 6: Submit loginToken to authnEngine and handle JS redirect
     print("[*] Finalizing session...")
     engine_url = "https://id.fudan.edu.cn/idp/authCenter/authnEngine"
     try:
         res_engine = session.post(engine_url, data={"loginToken": login_token})
-        
-        # Extract locationValue from JS redirect script
+
         match_loc = re.search(r'var locationValue = "([^"]+)"', res_engine.text)
         if not match_loc:
             raise Exception("[-] Failed to find redirection link in authentication engine response.")
-        
+
         redirect_url = match_loc.group(1).replace('&amp;', '&')
-        # Visit the redirect URL to set cookies for the student system
         res_final = session.get(redirect_url, allow_redirects=True, timeout=30)
         res_final = _follow_client_redirects(session, res_final)
         print(f"[+] Login final redirection: {_summarize_url(res_final.url)}")
     except Exception as e:
         raise Exception(f"[-] Session finalization failed: {e}")
 
-    # Add a short delay to ensure the session is fully established on the server side
     time.sleep(1)
+
+
+def crawl_grades():
+    from campus_access import connect_grade_session
+
+    stu_id = os.environ.get('StuId')
+    password = os.environ.get('UISPsw') # UISPsw will also be used as encryption key
+
+    if not stu_id or not password:
+        print("[-] Error: Environment variables StuId and UISPsw must be set.")
+        sys.exit(1)
+
+    session, backend = connect_grade_session(stu_id, password)
+    if backend != "webvpn":
+        _login_direct(session, stu_id, password)
 
     # Step 7: Dynamically find the grade sheet ID
     grade_base_url = "https://fdjwgl.fudan.edu.cn/student/for-std/grade/sheet/"
