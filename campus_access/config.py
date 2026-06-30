@@ -5,7 +5,7 @@ IDP_BASE = "https://id.fudan.edu.cn"
 GRADE_BASE = "https://fdjwgl.fudan.edu.cn"
 GRADE_TARGET = f"{GRADE_BASE}/student/for-std/grade/sheet/"
 
-ATRUST_PORTAL = os.environ.get("ATRUST_PORTAL", "https://atvpn.fudan.edu.cn").rstrip("/")
+ATRUST_PORTAL = os.environ.get("ATRUST_PORTAL", "").strip().rstrip("/")
 CAMPUS_ACCESS = os.environ.get("CAMPUS_ACCESS", "auto").strip().lower() or "auto"
 
 WEBVPN_AES_KEY = b"wrdvpnisthebest!"

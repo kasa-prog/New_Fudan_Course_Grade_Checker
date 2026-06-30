@@ -14,6 +14,21 @@ import base64
 from . import config
 
 
+def _extract_grade_sheet_id_from_response(response) -> str | None:
+    candidates = [response.url, html_mod.unescape(response.text or "")]
+    patterns = [
+        r"semester-index/(\d+)",
+        r"grade/sheet/info/(\d+)",
+        r"gradeSheetId[\"'\s:=]+(\d+)",
+    ]
+    for candidate in candidates:
+        for pattern in patterns:
+            match = re.search(pattern, candidate)
+            if match:
+                return match.group(1)
+    return None
+
+
 def encrypt_host(hostname: str) -> str:
     cipher = AES.new(config.WEBVPN_AES_KEY, AES.MODE_CFB, config.WEBVPN_AES_IV, segment_size=128)
     return hexlify(cipher.encrypt(hostname.encode("utf-8"))).decode("ascii")
@@ -66,7 +81,19 @@ class WebVPNSession:
 
     def connect_for_grades(self, student_id: str, password: str) -> "WebVPNSession":
         self.login(student_id, password)
-        self.authenticate_fdjwgl(student_id, password)
+        probe = self.get(config.GRADE_TARGET, allow_redirects=True, timeout=30)
+        grade_sheet_id = _extract_grade_sheet_id_from_response(probe)
+        if grade_sheet_id:
+            print("[+] fdjwgl grade portal already reachable through WebVPN")
+            return self
+        try:
+            self.authenticate_fdjwgl(student_id, password)
+        except RuntimeError as exc:
+            probe_after = self.get(config.GRADE_TARGET, allow_redirects=True, timeout=30)
+            if _extract_grade_sheet_id_from_response(probe_after):
+                print(f"[*] fdjwgl SSO step skipped after retry probe: {exc}")
+                return self
+            raise
         return self
 
     def login(self, student_id: str, password: str) -> bool:
