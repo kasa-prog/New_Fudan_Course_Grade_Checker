@@ -4,7 +4,7 @@ import html as html_mod
 import os
 import re
 from binascii import hexlify, unhexlify
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 from Crypto.Cipher import AES, PKCS1_v1_5
@@ -93,9 +93,18 @@ class WebVPNSession:
             if _extract_grade_sheet_id_from_response(probe_after):
                 print(f"[*] fdjwgl SSO step skipped after retry probe: {exc}")
                 return self
-            # WebVPN login alone may still be enough for fdjwgl via subsequent UIS login.
-            print(f"[*] fdjwgl SSO through WebVPN unavailable, keeping WebVPN session: {exc}")
-            return self
+            raise RuntimeError(f"fdjwgl SSO through WebVPN failed: {exc}")
+
+        # Verify the SSO actually granted access to the grade portal so the
+        # gateway can fall back to other backends instead of letting the
+        # caller fail later with a confusing "grade sheet ID" error.
+        probe_after = self.get(config.GRADE_TARGET, allow_redirects=True, timeout=30)
+        if not _extract_grade_sheet_id_from_response(probe_after):
+            raise RuntimeError(
+                "fdjwgl SSO completed but grade portal is still unreachable "
+                f"(final url={probe_after.url[:120]})"
+            )
+        print("[+] fdjwgl grade portal reachable through WebVPN")
         return self
 
     def login(self, student_id: str, password: str) -> bool:
@@ -133,45 +142,48 @@ class WebVPNSession:
 
     def authenticate_fdjwgl(self, student_id: str, password: str) -> bool:
         idp_vpn_base = get_vpn_url(config.IDP_BASE)
-        service_url = (
-            f"{config.GRADE_BASE}/student/sso/login?refer={quote(config.GRADE_TARGET, safe='')}"
-        )
-        auth_url = (
-            f"{config.IDP_BASE}/idp/authCenter/authenticate"
-            f"?service={quote(service_url, safe='')}"
+        entity_id = config.GRADE_BASE
+
+        # Mimic a browser clicking the fdjwgl SSO login link. Start from the
+        # service's own SSO entry point (not the IDP authenticate endpoint
+        # directly) and let requests follow the full redirect chain through
+        # the WebVPN proxy, exactly like Fudan_iCourse_Subscriber does for
+        # iCourse. The IDP then issues the /ac/ login page carrying lck.
+        sso_login_url = (
+            f"{config.GRADE_BASE}/student/sso/login"
+            f"?refer={quote(config.GRADE_TARGET, safe='')}"
         )
 
         print("[*] Starting fdjwgl SSO through WebVPN...")
-        resp = self.session.get(get_vpn_url(auth_url), allow_redirects=False, timeout=30)
+        resp = self.session.get(
+            get_vpn_url(sso_login_url), allow_redirects=True, timeout=60
+        )
+
+        # If the SSO chain already reached the grade portal (IDP reused the
+        # WebVPN session), there is nothing more to do.
+        if _extract_grade_sheet_id_from_response(resp):
+            print("[+] fdjwgl reachable after SSO redirect (no password needed)")
+            return True
 
         lck = None
-        entity_id = config.GRADE_BASE
-        for _ in range(15):
-            location = resp.headers.get("Location", "")
-            if resp.status_code not in (301, 302, 303, 307) or not location:
+        candidate_sources = [resp.url]
+        for hop in resp.history or []:
+            candidate_sources.append(hop.url)
+            candidate_sources.append(hop.headers.get("Location", ""))
+        for source in candidate_sources:
+            match = re.search(r"lck=([^&#\"']+)", source or "")
+            if match:
+                lck = match.group(1)
                 break
-            lck_match = re.search(r"lck=([^&#\"']+)", location)
-            entity_match = re.search(r"entityId=([^&#\"']+)", location)
-            if lck_match:
-                lck = lck_match.group(1)
-            if entity_match:
-                entity_id = requests.utils.unquote(entity_match.group(1))
-            if lck:
-                break
-            if not location.startswith("http"):
-                location = urljoin(resp.url, location)
-            resp = self.session.get(location, allow_redirects=False, timeout=30)
-
         if not lck:
-            for source in [resp.url, resp.text[:5000]]:
-                match = re.search(r"lck=([^&#\"']+)", source)
-                if match:
-                    lck = match.group(1)
-                    break
+            match = re.search(r"lck=([^&#\"']+)", resp.text[:8000])
+            if match:
+                lck = match.group(1)
 
         if not lck:
             raise RuntimeError(
-                f"Failed to extract lck for fdjwgl SSO (status={resp.status_code})"
+                f"Failed to extract lck for fdjwgl SSO "
+                f"(status={resp.status_code}, url={resp.url[:120]})"
             )
 
         auth_chain_code, request_type = self._query_auth_methods(
